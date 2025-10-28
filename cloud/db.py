@@ -43,15 +43,32 @@ def epoch_now() -> int:
     return int(time.time())
 
 
+def _to_sqlalchemy_psycopg_url(db_url: str) -> str:
+    """
+    Convert Postgres URLs (postgres:// or postgresql://) to SQLAlchemy's psycopg v3 URL:
+    postgresql+psycopg://...
+    Preserves query params (e.g., sslmode=require).
+    """
+    if db_url.startswith("postgres://"):
+        db_url = "postgresql://" + db_url[len("postgres://") :]
+    if db_url.startswith("postgresql://") and "+psycopg" not in db_url[:30]:
+        db_url = "postgresql+psycopg://" + db_url[len("postgresql://") :]
+    return db_url
+
+
 def make_engine(db_url: str):
     if not db_url:
         raise RuntimeError(
             "DATABASE_URL not provided. Set it as an environment variable."
         )
-    # Ensure SSL for Supabase/Neon
-    if "sslmode=" not in db_url and db_url.startswith("postgres"):
+    # Ensure sslmode=require for Supabase/Neon if not present
+    if "sslmode=" not in db_url and db_url.startswith(("postgres://", "postgresql://")):
         joiner = "&" if "?" in db_url else "?"
         db_url = f"{db_url}{joiner}sslmode=require"
+
+    # Rewrite to SQLAlchemy psycopg v3 URL so it doesn't try psycopg2
+    db_url = _to_sqlalchemy_psycopg_url(db_url)
+
     engine = create_engine(db_url, pool_pre_ping=True, future=True)
     return engine
 
