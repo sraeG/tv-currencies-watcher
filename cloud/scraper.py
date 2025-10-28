@@ -26,6 +26,10 @@ from settings import (
 from db import make_engine, create_tables, insert_first_seen, has_uuid, upsert_full_record
 from parsing import parse_listing_for_uuids_and_links, parse_detail_page
 
+DEBUG_HTML = os.getenv("DEBUG_HTML", "0") == "1"
+DEBUG_DIR = Path("/tmp/tvwatcher")
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+
 def _debug_save(name: str, content: str) -> None:
     if not DEBUG_HTML:
         return
