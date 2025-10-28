@@ -45,5 +45,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           JITTER_LOW: "10"
           JITTER_HIGH: "20"
+          DEBUG_DB_URL: "1"   # <- optional, for one run
         run: |
           python cloud/scraper.py
