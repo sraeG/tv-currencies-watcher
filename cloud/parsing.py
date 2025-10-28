@@ -37,13 +37,51 @@ def deep_find_key(obj: Any, key: str) -> Optional[Any]:
 
 # ---- Listing page ----
 
-def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
+def _parse_listing_from_prs_json(html: str) -> List[Dict[str, str]]:
     """
-    Extract candidate idea links and uuids from the listing page.
-    We keep this generic & resilient by:
-      - Looking for common idea/chart href patterns
-      - Deriving a UUID-like token from /chart/<uuid>/ or /idea/<slug>/<uuid>
-    Returns list of {"uuid": ..., "url": ...} ordered as they appear (newest -> oldest).
+    Prefer extracting from the listing page's prs.init-data+json.
+    We look for an array of idea-like objects that contain uuid + publicPath (or url).
+    """
+    out: List[Dict[str, str]] = []
+    seen = set()
+    init_json = find_prs_init_json(html)
+    if not isinstance(init_json, dict):
+        return out
+
+    # Common containers we've seen: 'ideas', 'items', 'list', nested 'ideas' under other keys
+    candidates = []
+    # Try a few likely keys first
+    for k in ["ideas", "items", "list"]:
+        v = init_json.get(k)
+        if isinstance(v, list):
+            candidates.append(v)
+
+    # Generic deep search as a fallback
+    if not candidates:
+        v = deep_find_key(init_json, "ideas")
+        if isinstance(v, list):
+            candidates.append(v)
+
+    # Flatten and extract uuid/publicPath
+    for arr in candidates:
+        for it in arr:
+            if not isinstance(it, dict):
+                continue
+            uuid = it.get("uuid")
+            url = it.get("publicPath") or it.get("url")
+            # Some feeds store a relative URL; normalize
+            if isinstance(url, str) and url.startswith("/"):
+                url = "https://www.tradingview.com" + url
+            if uuid and url and uuid not in seen:
+                seen.add(uuid)
+                out.append({"uuid": uuid, "url": url})
+
+    return out
+
+
+def _parse_listing_from_anchors(html: str) -> List[Dict[str, str]]:
+    """
+    Fallback: scrape anchors for /chart/... or /idea/... patterns.
     """
     soup = BeautifulSoup(html, "html.parser")
     hrefs = []
@@ -55,18 +93,15 @@ def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
     results: List[Dict[str, str]] = []
     seen = set()
     for href in hrefs:
-        # Normalize to absolute
         url = href
         if url.startswith("/"):
             url = "https://www.tradingview.com" + url
 
-        # Try to extract a plausible uuid
         uuid = None
         m = re.search(r"/chart/([A-Za-z0-9]+)/", href)
         if m:
             uuid = m.group(1)
         else:
-            # Some idea URLs embed an id at the end; try generic token
             m2 = re.search(r"/idea/[^/]+/([A-Za-z0-9]+)", href)
             if m2:
                 uuid = m2.group(1)
@@ -78,14 +113,24 @@ def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
     return results
 
 
+def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
+    """
+    Extract newest→older ideas from the currencies recent page.
+    1) Try JSON script (prs.init-data+json) first.
+    2) Fallback to anchor scanning.
+    """
+    items = _parse_listing_from_prs_json(html)
+    if not items:
+        items = _parse_listing_from_anchors(html)
+    return items
+
+
 # ---- Detail page ----
 
 def iso_to_epoch(iso_str: Optional[str]) -> Optional[int]:
     if not iso_str:
         return None
     try:
-        # Avoid importing dateutil here; keep light. Handle trailing Z.
-        from datetime import datetime
         from dateutil import parser as dtparser
         dt = dtparser.isoparse(iso_str)
         return int(dt.timestamp())
@@ -116,7 +161,6 @@ def extract_elements_from_content(content: Any) -> List[dict]:
         try:
             content = json.loads(content)
         except Exception:
-            # keep as string; cannot extract structured elements
             return []
 
     paths = [
@@ -155,7 +199,6 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
         idea = deep_find_key(init_json, "ssrIdeaData")
 
     if not isinstance(idea, dict):
-        # Can't parse expected JSON; return minimal
         return {
             "username": None,
             "symbol": None,
@@ -176,7 +219,6 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
             },
         }
 
-    # content might be a JSON string; leave decoding for elements only
     content = idea.get("content")
 
     data_obj = {
