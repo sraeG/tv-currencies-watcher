@@ -21,6 +21,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Sanity-check DATABASE_URL shape (no password)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - << 'PY'
+          import os, urllib.parse
+          url = os.environ["DATABASE_URL"].strip()
+          # Basic validation
+          assert url.startswith(("postgres://","postgresql://")), f"Bad scheme: {url[:20]}"
+          print("Has sslmode=require?", "sslmode=require" in url)
+          # Scrub password then print host:port/db
+          without_scheme = url.split("://",1)[1]
+          creds_and_rest = without_scheme.split("@",1)
+          rest = creds_and_rest[1] if len(creds_and_rest)==2 else without_scheme
+          host_port_db = rest.split("?",1)[0]
+          print("Host/Port/DB:", host_port_db)
+          PY
+
       - name: Run scraper
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
