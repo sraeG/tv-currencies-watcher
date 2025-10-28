@@ -46,5 +46,15 @@ jobs:
           JITTER_LOW: "10"
           JITTER_HIGH: "20"
           DEBUG_DB_URL: "1"   # <- optional, for one run
+          EBUG_HTML: "1"
         run: |
           python cloud/scraper.py
+
+
+      - name: Upload HTML artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvwatcher-html
+          path: /tmp/tvwatcher/*.html
+          if-no-files-found: ignore
