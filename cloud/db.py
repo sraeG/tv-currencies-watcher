@@ -5,9 +5,9 @@ from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
-    Column,
     String,
     Text,
+    DateTime,
     create_engine,
     func,
 )
@@ -32,10 +32,10 @@ class Chart(Base):
     data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     scraped_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
-        nullable=False, default_factory=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     source_page: Mapped[str] = mapped_column(
-        Text, nullable=False, default="currencies_recent"
+        Text, nullable=False, server_default="currencies_recent"
     )
 
 
@@ -48,7 +48,7 @@ def make_engine(db_url: str):
         raise RuntimeError(
             "DATABASE_URL not provided. Set it as an environment variable."
         )
-    # Prefer sslmode=require if not specified (for Supabase/Neon)
+    # Ensure SSL for Supabase/Neon
     if "sslmode=" not in db_url and db_url.startswith("postgres"):
         joiner = "&" if "?" in db_url else "?"
         db_url = f"{db_url}{joiner}sslmode=require"
@@ -94,20 +94,16 @@ def upsert_full_record(
         direction=direction,
         data=data,
         scraped_at=now_epoch,
-        # first_seen_at is only set on first insert via insert_first_seen
-        # source_page stays as inserted default
     ).on_conflict_do_update(
         index_elements=[Chart.__table__.c.uuid],
-        set_(
-            {
-                "username": username,
-                "symbol": symbol,
-                "created_at": created_at,
-                "interval": interval,
-                "direction": direction,
-                "data": data,
-                "scraped_at": now_epoch,
-            }
-        ),
+        set_={
+            "username": username,
+            "symbol": symbol,
+            "created_at": created_at,
+            "interval": interval,
+            "direction": direction,
+            "data": data,
+            "scraped_at": now_epoch,
+        },
     )
     session.execute(stmt)
