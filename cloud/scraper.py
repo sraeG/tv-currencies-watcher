@@ -63,6 +63,8 @@ def main() -> int:
         # 1) Fetch listing
         listing_html = http_get(RECENT_CURRENCIES_URL)
         items = parse_listing_for_uuids_and_links(listing_html)
+        print(f"Listing items found: {len(items)}")
+
 
         # 2) Iterate newest -> older, stop at first known
         for item in items:
