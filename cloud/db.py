@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -14,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import URL, make_url
 
 
 class Base(DeclarativeBase):
@@ -43,33 +45,53 @@ def epoch_now() -> int:
     return int(time.time())
 
 
-def _to_sqlalchemy_psycopg_url(db_url: str) -> str:
+def _build_sqlalchemy_url(db_url: str) -> URL:
     """
-    Convert Postgres URLs (postgres:// or postgresql://) to SQLAlchemy's psycopg v3 URL:
-    postgresql+psycopg://...
-    Preserves query params (e.g., sslmode=require).
+    Parse the DATABASE_URL robustly and emit a SQLAlchemy URL with the psycopg v3 driver.
+    Also ensures sslmode=require is present.
     """
+    if not db_url:
+        raise RuntimeError("DATABASE_URL not provided. Set it as an environment variable.")
+
+    # Normalize scheme
     if db_url.startswith("postgres://"):
         db_url = "postgresql://" + db_url[len("postgres://") :]
-    if db_url.startswith("postgresql://") and "+psycopg" not in db_url[:30]:
-        db_url = "postgresql+psycopg://" + db_url[len("postgresql://") :]
-    return db_url
+
+    url = make_url(db_url)
+
+    # Enforce psycopg v3 driver
+    drivername = url.drivername
+    if not drivername.startswith("postgresql+psycopg"):
+        drivername = "postgresql+psycopg"
+
+    # Ensure sslmode=require
+    q = dict(url.query) if url.query else {}
+    q.setdefault("sslmode", "require")
+
+    # Rebuild clean URL (prevents weird host/password parsing issues)
+    clean = URL.create(
+        drivername=drivername,
+        username=url.username,
+        password=url.password,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        query=q,
+    )
+
+    # Optional debug output (no secrets)
+    if os.getenv("DEBUG_DB_URL") == "1":
+        print(
+            f"[DB] driver={drivername} host={clean.host} port={clean.port} db={clean.database} "
+            f"sslmode={clean.query.get('sslmode')}"
+        )
+
+    return clean
 
 
 def make_engine(db_url: str):
-    if not db_url:
-        raise RuntimeError(
-            "DATABASE_URL not provided. Set it as an environment variable."
-        )
-    # Ensure sslmode=require for Supabase/Neon if not present
-    if "sslmode=" not in db_url and db_url.startswith(("postgres://", "postgresql://")):
-        joiner = "&" if "?" in db_url else "?"
-        db_url = f"{db_url}{joiner}sslmode=require"
-
-    # Rewrite to SQLAlchemy psycopg v3 URL so it doesn't try psycopg2
-    db_url = _to_sqlalchemy_psycopg_url(db_url)
-
-    engine = create_engine(db_url, pool_pre_ping=True, future=True)
+    clean_url = _build_sqlalchemy_url(db_url)
+    engine = create_engine(clean_url, pool_pre_ping=True, future=True)
     return engine
 
 
