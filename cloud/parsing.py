@@ -6,16 +6,23 @@ from bs4 import BeautifulSoup
 
 # ---- Utilities ----
 
-def find_prs_init_json(html: str) -> Optional[dict]:
-    """Return the decoded JSON from <script type="application/prs.init-data+json"> if present."""
+def find_all_prs_init_jsons(html: str) -> List[dict]:
+    """
+    Return decoded JSON objects from ALL <script type="application/prs.init-data+json"> tags.
+    Ignore any that fail to decode.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    tag = soup.find("script", {"type": "application/prs.init-data+json"})
-    if not tag or not tag.string:
-        return None
-    try:
-        return json.loads(tag.string)
-    except Exception:
-        return None
+    out: List[dict] = []
+    for tag in soup.find_all("script", {"type": "application/prs.init-data+json"}):
+        if not tag.string:
+            continue
+        try:
+            data = json.loads(tag.string)
+            if isinstance(data, (dict, list)):
+                out.append(data)
+        except Exception:
+            continue
+    return out
 
 
 def deep_find_key(obj: Any, key: str) -> Optional[Any]:
@@ -37,89 +44,92 @@ def deep_find_key(obj: Any, key: str) -> Optional[Any]:
 
 # ---- Listing page ----
 
-def _parse_listing_from_prs_json(html: str) -> List[Dict[str, str]]:
+def _collect_idea_like_dicts(obj: Any, out: List[Dict[str, str]]) -> None:
     """
-    Prefer extracting from the listing page's prs.init-data+json.
-    We look for an array of idea-like objects that contain uuid + publicPath (or url).
+    Walk arbitrary JSON and collect dicts that look like idea cards, i.e.,
+    have a UUID and a URL/publicPath to the idea page.
     """
-    out: List[Dict[str, str]] = []
+    if isinstance(obj, dict):
+        # Heuristics:
+        # - Many feeds use 'publicPath' like '/idea/<slug>/<uuid>/'
+        # - Some have 'url' fields that are relative and include '/idea/'
+        # - Ensure we have a 'uuid' alongside.
+        uuid = obj.get("uuid")
+        public_path = obj.get("publicPath") or obj.get("public_path")
+        url = obj.get("url") or obj.get("href")
+        cand_url = None
+
+        if isinstance(public_path, str) and "/idea/" in public_path:
+            cand_url = public_path
+        elif isinstance(url, str) and "/idea/" in url:
+            cand_url = url
+
+        if uuid and isinstance(uuid, str) and cand_url:
+            if cand_url.startswith("/"):
+                cand_url = "https://www.tradingview.com" + cand_url
+            out.append({"uuid": uuid, "url": cand_url})
+
+        # Recurse
+        for v in obj.values():
+            _collect_idea_like_dicts(v, out)
+
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_idea_like_dicts(item, out)
+
+
+def _parse_listing_from_prs_jsons(html: str) -> List[Dict[str, str]]:
+    all_jsons = find_all_prs_init_jsons(html)
+    candidates: List[Dict[str, str]] = []
+    for j in all_jsons:
+        _collect_idea_like_dicts(j, candidates)
+
+    # De-dupe by uuid, keep order
     seen = set()
-    init_json = find_prs_init_json(html)
-    if not isinstance(init_json, dict):
-        return out
-
-    # Common containers we've seen: 'ideas', 'items', 'list', nested 'ideas' under other keys
-    candidates = []
-    # Try a few likely keys first
-    for k in ["ideas", "items", "list"]:
-        v = init_json.get(k)
-        if isinstance(v, list):
-            candidates.append(v)
-
-    # Generic deep search as a fallback
-    if not candidates:
-        v = deep_find_key(init_json, "ideas")
-        if isinstance(v, list):
-            candidates.append(v)
-
-    # Flatten and extract uuid/publicPath
-    for arr in candidates:
-        for it in arr:
-            if not isinstance(it, dict):
-                continue
-            uuid = it.get("uuid")
-            url = it.get("publicPath") or it.get("url")
-            # Some feeds store a relative URL; normalize
-            if isinstance(url, str) and url.startswith("/"):
-                url = "https://www.tradingview.com" + url
-            if uuid and url and uuid not in seen:
-                seen.add(uuid)
-                out.append({"uuid": uuid, "url": url})
-
+    out: List[Dict[str, str]] = []
+    for it in candidates:
+        u = it.get("uuid")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(it)
     return out
 
 
 def _parse_listing_from_anchors(html: str) -> List[Dict[str, str]]:
     """
-    Fallback: scrape anchors for /chart/... or /idea/... patterns.
+    Fallback: scrape anchors for /idea/ patterns (more restrictive than before).
     """
     soup = BeautifulSoup(html, "html.parser")
-    hrefs = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/chart/") or "/idea/" in href:
-            hrefs.append(href)
-
     results: List[Dict[str, str]] = []
     seen = set()
-    for href in hrefs:
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/idea/" not in href:
+            continue
         url = href
         if url.startswith("/"):
             url = "https://www.tradingview.com" + url
 
-        uuid = None
-        m = re.search(r"/chart/([A-Za-z0-9]+)/", href)
-        if m:
-            uuid = m.group(1)
-        else:
-            m2 = re.search(r"/idea/[^/]+/([A-Za-z0-9]+)", href)
-            if m2:
-                uuid = m2.group(1)
-
-        if uuid and uuid not in seen:
-            seen.add(uuid)
-            results.append({"uuid": uuid, "url": url})
-
+        # Try to extract a plausible UUID token at the end of /idea/<slug>/<uuid>[/]
+        m = re.search(r"/idea/[^/]+/([A-Za-z0-9]+)(?:/|$)", url)
+        if not m:
+            continue
+        uuid = m.group(1)
+        if uuid in seen:
+            continue
+        seen.add(uuid)
+        results.append({"uuid": uuid, "url": url})
     return results
 
 
 def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
     """
     Extract newest→older ideas from the currencies recent page.
-    1) Try JSON script (prs.init-data+json) first.
-    2) Fallback to anchor scanning.
+    1) Try aggregating over ALL prs.init-data+json scripts.
+    2) Fallback to anchor scanning for /idea/ links.
     """
-    items = _parse_listing_from_prs_json(html)
+    items = _parse_listing_from_prs_jsons(html)
     if not items:
         items = _parse_listing_from_anchors(html)
     return items
@@ -190,13 +200,22 @@ def extract_elements_from_content(content: Any) -> List[dict]:
 def parse_detail_page(html: str) -> Dict[str, Any]:
     """
     Parse TV idea detail HTML to the expected fields.
-    We search for `ssrIdeaData` within <script type="application/prs.init-data+json">,
+    We search for `ssrIdeaData` within ANY of the prs.init-data+json scripts,
     then map to our neutral dict.
     """
-    init_json = find_prs_init_json(html)
+    # Use the multi-script reader here too (some idea pages also have >1 tag)
+    soup = BeautifulSoup(html, "html.parser")
     idea = None
-    if init_json is not None:
-        idea = deep_find_key(init_json, "ssrIdeaData")
+    for tag in soup.find_all("script", {"type": "application/prs.init-data+json"}):
+        if not tag.string:
+            continue
+        try:
+            data = json.loads(tag.string)
+        except Exception:
+            continue
+        idea = deep_find_key(data, "ssrIdeaData")
+        if isinstance(idea, dict):
+            break
 
     if not isinstance(idea, dict):
         return {
