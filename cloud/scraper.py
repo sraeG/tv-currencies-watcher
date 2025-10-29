@@ -3,12 +3,10 @@ import os
 import random
 import sys
 import time
-from dataclasses import asdict
 from typing import List
 
 import requests
-from bs4 import BeautifulSoup  # noqa: F401 (import ensures bs4 present per requirements)
-from pathlib import Path
+from bs4 import BeautifulSoup  # ensure present
 
 from settings import (
     DATABASE_URL,
@@ -19,38 +17,12 @@ from settings import (
     CONNECT_TIMEOUT,
     RETRY_BACKOFF_SECS,
     USER_AGENT,
-    RECENT_CURRENCIES_URL,
+    RECENT_LISTING_URL,
     SOURCE_PAGE,
     RunStats,
 )
 from db import make_engine, create_tables, insert_first_seen, has_uuid, upsert_full_record
 from parsing import parse_listing_for_uuids_and_links, parse_detail_page
-
-DEBUG_HTML = os.getenv("DEBUG_HTML", "0") == "1"
-DEBUG_DIR = Path("/tmp/tvwatcher")
-DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-
-def _debug_save(name: str, content: str) -> None:
-    if not DEBUG_HTML:
-        return
-    p = DEBUG_DIR / name
-    try:
-        p.write_text(content, encoding="utf-8", errors="ignore")
-        print(f"[DEBUG] saved HTML -> {p}")
-    except Exception as e:
-        print(f"[DEBUG] failed to save {name}: {e}")
-
-def _debug_print_html_stats(label: str, html: str) -> None:
-    soup = BeautifulSoup(html, "html.parser")
-    title = (soup.title.string.strip() if soup.title and soup.title.string else "")
-    scripts = soup.find_all("script", {"type": "application/prs.init-data+json"})
-    print(
-        f"[DEBUG] {label}: len={len(html)} title={title!r} prs.init-data+json tags={len(scripts)}"
-    )
-    # Show a tiny snippet of the first PRS JSON (without dumping everything)
-    if scripts:
-        snippet = scripts[0].string[:200].replace("\n", " ") if scripts[0].string else ""
-        print(f"[DEBUG] {label}: first prs.init-data+json starts with: {snippet!r}")
 
 def http_get(url: str) -> str:
     headers = {"User-Agent": USER_AGENT}
@@ -58,7 +30,6 @@ def http_get(url: str) -> str:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
-            
             print(f"[HTTP] GET {url} -> {resp.status_code}")
             if 200 <= resp.status_code < 300:
                 return resp.text
@@ -70,65 +41,61 @@ def http_get(url: str) -> str:
             time.sleep(RETRY_BACKOFF_SECS * attempt)
     raise last_err  # type: ignore[misc]
 
-
 def main() -> int:
-    # Small polite jitter each run
+    # Polite jitter per run
     jitter = random.randint(JITTER_LOW, JITTER_HIGH)
     time.sleep(jitter)
 
+    # DB init
     engine = make_engine(DATABASE_URL)
     create_tables(engine)
 
     stats = RunStats()
+    from sqlalchemy.orm import Session
 
     with engine.begin() as conn:
-        from sqlalchemy.orm import Session
-
         session = Session(bind=conn)
 
-        # 1) Fetch listing
-        print(f"[DEBUG] Requesting listing page: {RECENT_CURRENCIES_URL}")
-        listing_html = http_get(RECENT_CURRENCIES_URL)
+        # 1) Fetch listing (your route)
+        print(f"[DEBUG] Requesting listing page: {RECENT_LISTING_URL}")
+        listing_html = http_get(RECENT_LISTING_URL)
         print(f"[DEBUG] Listing page fetched, length={len(listing_html)}")
 
-        _debug_print_html_stats("listing", listing_html)
-        _debug_save("listing.html", listing_html)
         items = parse_listing_for_uuids_and_links(listing_html)
         print(f"[DEBUG] Parsed {len(items)} idea items from listing")
         if items:
-            print("[DEBUG] First 3 items:", items[:3])
-        print(f"Listing items found: {len(items)}")
-
+            print("[DEBUG] First 5 idea URLs:", [it["url"] for it in items[:5]])
 
         # 2) Iterate newest -> older, stop at first known
-        saved_detail = 0
         for item in items:
             uuid = item["uuid"]
             url = item["url"]
-            print(f"[DEBUG] Visiting idea {uuid} at {url}")
 
             if has_uuid(session, uuid):
                 print(f"SKIP {uuid} (already seen)")
                 stats.skipped += 1
                 break  # Stop scanning listing on first known
-    
-            detail_html = http_get(url)
-    
-            # Save first few detail pages to artifacts for debugging
-            if DEBUG_HTML and saved_detail < 3:
-                _debug_print_html_stats(f"detail {uuid}", detail_html)
-                _debug_save(f"idea_{uuid}.html", detail_html)
-                saved_detail += 1
-    
-            parsed = parse_detail_page(detail_html)
-            print(f"[DEBUG] Parsed detail for {uuid}: symbol={parsed.get('symbol')} interval={parsed.get('interval')} direction={parsed.get('direction')}")
 
+            print(f"[DEBUG] Visiting idea {uuid} at {url}")
+            detail_html = http_get(url)
+            parsed = parse_detail_page(detail_html)
+
+            sym = (parsed.get("symbol") or "NONE") or "NONE"
+            # Forex 6-letter pairs (letters) OR XAU* (e.g., XAUUSD, XAUEUR, etc.)
+            is_fx = (isinstance(sym, str) and ((len(sym) == 6 and sym.isalpha()) or sym.upper().startswith("XAU")))
+            if not is_fx:
+                print(f"[DEBUG] Non-FX/XAU idea {uuid} sym={sym}; ignoring")
+                # Do NOT insert first_seen for out-of-scope
+                continue
+
+            # Record first-seen only for in-scope ideas
+            insert_first_seen(session, uuid, SOURCE_PAGE)
 
             upsert_full_record(
                 session,
                 uuid=uuid,
                 username=parsed.get("username"),
-                symbol=parsed.get("symbol"),
+                symbol=sym,
                 created_at=parsed.get("created_at"),
                 interval=parsed.get("interval"),
                 direction=parsed.get("direction"),
@@ -136,20 +103,14 @@ def main() -> int:
             )
 
             elements_count = len((parsed.get("data") or {}).get("elements", []) or [])
-            print(
-                f"NEW {uuid} {(parsed.get('symbol') or 'NONE')} "
-                f"elements={elements_count}"
-            )
+            print(f"NEW {uuid} {sym} elements={elements_count}")
             stats.new += 1
 
         session.commit()
 
-    # Final line for CI logs
     print("[DEBUG] Finished run, summary:")
-
     print(f"DONE new={stats.new} skipped={stats.skipped}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
