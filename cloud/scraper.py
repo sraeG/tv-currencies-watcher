@@ -58,6 +58,7 @@ def http_get(url: str) -> str:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+            
             print(f"[HTTP] GET {url} -> {resp.status_code}")
             if 200 <= resp.status_code < 300:
                 return resp.text
@@ -86,10 +87,16 @@ def main() -> int:
         session = Session(bind=conn)
 
         # 1) Fetch listing
+        print(f"[DEBUG] Requesting listing page: {RECENT_CURRENCIES_URL}")
         listing_html = http_get(RECENT_CURRENCIES_URL)
+        print(f"[DEBUG] Listing page fetched, length={len(listing_html)}")
+
         _debug_print_html_stats("listing", listing_html)
         _debug_save("listing.html", listing_html)
         items = parse_listing_for_uuids_and_links(listing_html)
+        print(f"[DEBUG] Parsed {len(items)} idea items from listing")
+        if items:
+            print("[DEBUG] First 3 items:", items[:3])
         print(f"Listing items found: {len(items)}")
 
 
@@ -98,7 +105,8 @@ def main() -> int:
         for item in items:
             uuid = item["uuid"]
             url = item["url"]
-    
+            print(f"[DEBUG] Visiting idea {uuid} at {url}")
+
             if has_uuid(session, uuid):
                 print(f"SKIP {uuid} (already seen)")
                 stats.skipped += 1
@@ -113,6 +121,8 @@ def main() -> int:
                 saved_detail += 1
     
             parsed = parse_detail_page(detail_html)
+            print(f"[DEBUG] Parsed detail for {uuid}: symbol={parsed.get('symbol')} interval={parsed.get('interval')} direction={parsed.get('direction')}")
+
 
             upsert_full_record(
                 session,
@@ -135,6 +145,8 @@ def main() -> int:
         session.commit()
 
     # Final line for CI logs
+    print("[DEBUG] Finished run, summary:")
+
     print(f"DONE new={stats.new} skipped={stats.skipped}")
     return 0
 
