@@ -10,7 +10,7 @@ DEFAULT_UA = (
     "Chrome/120.0 Safari/537.36"
 )
 
-RECENT_CURRENCIES_URL = (
+RECENT_LISTING_URL = (
     "https://www.tradingview.com/markets/currencies/ideas/?sort=recent"
 )
 
