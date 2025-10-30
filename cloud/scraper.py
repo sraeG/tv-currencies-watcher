@@ -24,6 +24,7 @@ from settings import (
 from db import make_engine, create_tables, insert_first_seen, has_uuid, upsert_full_record
 from parsing import parse_listing_for_uuids_and_links, parse_detail_page
 
+
 def http_get(url: str) -> str:
     headers = {"User-Agent": USER_AGENT}
     last_err = None
@@ -41,6 +42,7 @@ def http_get(url: str) -> str:
             time.sleep(RETRY_BACKOFF_SECS * attempt)
     raise last_err  # type: ignore[misc]
 
+
 def main() -> int:
     # Polite jitter per run
     jitter = random.randint(JITTER_LOW, JITTER_HIGH)
@@ -56,7 +58,7 @@ def main() -> int:
     with engine.begin() as conn:
         session = Session(bind=conn)
 
-        # 1) Fetch listing (your route)
+        # 1) Fetch listing
         print(f"[DEBUG] Requesting listing page: {RECENT_LISTING_URL}")
         listing_html = http_get(RECENT_LISTING_URL)
         print(f"[DEBUG] Listing page fetched, length={len(listing_html)}")
@@ -66,7 +68,8 @@ def main() -> int:
         if items:
             print("[DEBUG] First 5 idea URLs:", [it["url"] for it in items[:5]])
 
-        # 2) Iterate newest -> older, stop at first known
+        # 2) Iterate ALL items on the page; only fetch details for new UUIDs.
+        #    (No more stop-at-first-known; avoids missing ideas due to sponsored/pinned posts.)
         for item in items:
             uuid = item["uuid"]
             url = item["url"]
@@ -74,7 +77,7 @@ def main() -> int:
             if has_uuid(session, uuid):
                 print(f"SKIP {uuid} (already seen)")
                 stats.skipped += 1
-                break  # Stop scanning listing on first known
+                continue  # <-- key change: do NOT break; just skip this one
 
             print(f"[DEBUG] Visiting idea {uuid} at {url}")
             detail_html = http_get(url)
@@ -111,6 +114,7 @@ def main() -> int:
     print("[DEBUG] Finished run, summary:")
     print(f"DONE new={stats.new} skipped={stats.skipped}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
