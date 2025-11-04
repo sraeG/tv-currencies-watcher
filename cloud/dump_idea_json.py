@@ -108,9 +108,9 @@ def main():
     print("\n[INFO] Compact ssrIdeaData dump (truncated big fields):")
     dump = dict(idea)
     # strip huge fields for readability
-    for k in ["content", "description_ast", "updates"]:
+    '''for k in ["content", "description_ast", "updates"]:
         if k in dump:
-            dump[k] = f"<{k} omitted>"
+            dump[k] = f"<{k} omitted>"'''
     print(json.dumps(dump, indent=2)[:4000])  # truncate to keep logs sane
 
 if __name__ == "__main__":
