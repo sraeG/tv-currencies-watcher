@@ -6,7 +6,7 @@ import os
 
 DEBUG = os.getenv("DEBUG_PARSER", "0") == "1"
 
-# ---------- Listing (your anchor logic) ----------
+# ---------- Listing (anchor logic) ----------
 
 def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
     """
@@ -20,10 +20,7 @@ def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
         if "/chart/" not in href:
             continue
         # Normalize to absolute URL
-        if href.startswith("/"):
-            full = "https://www.tradingview.com" + href
-        else:
-            full = href
+        full = "https://www.tradingview.com" + href if href.startswith("/") else href
         parts = full.strip("/").split("/")
         # Expect .../chart/<symbol>/<uuid>...
         try:
@@ -104,7 +101,7 @@ def _extract_elements_from_content(content: Any) -> List[dict]:
     return out
 
 def _iter_sources(content: Any) -> List[dict]:
-    """Yield all source dicts from both known paths."""
+    """Return all source dicts from both known paths, parsing content if it's a JSON string."""
     if isinstance(content, str):
         try:
             content = json.loads(content)
@@ -124,13 +121,19 @@ def _iter_sources(content: Any) -> List[dict]:
                     out.append(item)
     return out
 
-def get_pricescale(idea: dict) -> Optional[int]:
+# ---------- pricescale extraction ----------
+
+def get_pricescale_from_idea(idea: dict) -> Optional[int]:
     """
-    Try multiple locations:
-    1) idea['symbol']['pricescale']
-    2) idea['symbol']['price_scale'] (alt key)
-    3) content sources where type contains 'MainSeries' -> state.pricescale
-    4) any source with state.pricescale
+    Try to find pricescale within the idea payload, in order of preference:
+      1) idea['symbol']['pricescale'] or ['price_scale']
+      2) Any content source with type containing 'MainSeries':
+           - source.state.pricescale
+           - source.formattingDeps.pricescale
+      3) Any content source (regardless of type) with:
+           - state.pricescale
+           - formattingDeps.pricescale
+    Returns an int or None.
     """
     sym = idea.get("symbol") or {}
     ps = sym.get("pricescale")
@@ -138,7 +141,7 @@ def get_pricescale(idea: dict) -> Optional[int]:
         ps = sym.get("price_scale")
         if ps is not None and DEBUG:
             print(f"[DEBUG] pricescale from symbol.price_scale = {ps}")
-    if ps is not None:
+    if isinstance(ps, int):
         if DEBUG:
             print(f"[DEBUG] pricescale from symbol.pricescale = {ps}")
         return ps
@@ -151,28 +154,31 @@ def get_pricescale(idea: dict) -> Optional[int]:
         t = src.get("type") or ""
         if isinstance(t, str) and "MainSeries" in t:
             state = src.get("state") or {}
-            ps = state.get("pricescale")
-            if ps is not None:
+            fmt   = src.get("formattingDeps") or {}
+            if isinstance(state.get("pricescale"), int):
                 if DEBUG:
-                    print(f"[DEBUG] pricescale from MainSeries.state.pricescale = {ps}")
-                return ps
+                    print(f"[DEBUG] pricescale from MainSeries.state.pricescale = {state['pricescale']}")
+                return state["pricescale"]
+            if isinstance(fmt.get("pricescale"), int):
+                if DEBUG:
+                    print(f"[DEBUG] pricescale from MainSeries.formattingDeps.pricescale = {fmt['pricescale']}")
+                return fmt["pricescale"]
 
-    # Fallback: any source with state.pricescale
+    # Fallback: any source with state/formattingDeps.pricescale
     for src in sources:
         state = src.get("state") or {}
-        ps = state.get("pricescale")
-        if ps is not None:
+        fmt   = src.get("formattingDeps") or {}
+        if isinstance(state.get("pricescale"), int):
             if DEBUG:
-                t = src.get("type")
-                print(f"[DEBUG] pricescale from source(type={t}).state.pricescale = {ps}")
-            return ps
+                print(f"[DEBUG] pricescale from source.state.pricescale = {state['pricescale']}")
+            return state["pricescale"]
+        if isinstance(fmt.get("pricescale"), int):
+            if DEBUG:
+                print(f"[DEBUG] pricescale from source.formattingDeps.pricescale = {fmt['pricescale']}")
+            return fmt["pricescale"]
 
     if DEBUG:
-        # Print a tiny diagnostic of where we looked
-        print("[DEBUG] pricescale not found. symbol keys:", list(sym.keys()))
-        # Show the first few source types to help inspection
-        first_types = [s.get("type") for s in sources[:5]]
-        print("[DEBUG] first source types:", first_types)
+        print("[DEBUG] pricescale not found in idea payload")
     return None
 
 # ---------- Detail page parsing (your semantics + pricescale) ----------
@@ -240,7 +246,7 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
     elements = _extract_elements_from_content(content)
 
     sym_obj = idea.get("symbol") or {}
-    pricescale = get_pricescale(idea)
+    pricescale = get_pricescale_from_idea(idea)
 
     data_obj = {
         "chart_url": idea.get("publicPath") or idea.get("chart_url"),
