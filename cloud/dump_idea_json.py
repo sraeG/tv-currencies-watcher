@@ -130,7 +130,7 @@ def main():
     '''for k in ["content", "description_ast", "updates"]:
         if k in dump:
             dump[k] = f"<{k} omitted>"'''
-    print(json.dumps(dump, indent=2)[:4000])  # truncate to keep logs sane
+    print(json.dumps(dump, indent=2))  # truncate to keep logs sane
 
 if __name__ == "__main__":
     main()
