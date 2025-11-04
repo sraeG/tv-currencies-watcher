@@ -73,11 +73,30 @@ def main():
     print("[INFO] symbol snippet:", json.dumps({k: sym.get(k) for k in ["short_name", "pricescale", "price_scale", "minmov", "minmove"]}, indent=2))
 
     # Try to locate pricescale anywhere in idea JSON (case-insensitive)
-    idea_text = json.dumps(idea)
-    if re.search(r'price[_\- ]?scale', idea_text, flags=re.I):
-        print("[INFO] Found a 'price...scale' key somewhere in idea JSON")
+    def find_key_paths(obj, match_pattern, path=None):
+        """Yield (path, value) for keys matching regex anywhere in nested dict/list."""
+        import re
+        if path is None:
+            path = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if re.search(match_pattern, str(k), flags=re.I):
+                    yield (path + [k], v)
+                yield from find_key_paths(v, match_pattern, path + [k])
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                yield from find_key_paths(v, match_pattern, path + [i])
+
+    matches = list(find_key_paths(idea, r'price[_\- ]?scale'))
+    
+    if not matches:
+        print("[INFO] No 'price...scale' keys found anywhere in idea JSON.")
     else:
-        print("[INFO] No 'price...scale' key text found in idea JSON")
+        print(f"[INFO] Found {len(matches)} 'price...scale' key(s) at:")
+        for p, val in matches:
+            path_str = " → ".join(str(x) for x in p)
+            print(f"   - {path_str} = {val}")
+
 
     # Inspect sources for MainSeries
     def safe_get(d, path):
