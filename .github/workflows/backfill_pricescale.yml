@@ -1,0 +1,35 @@
+name: backfill-pricescale
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Rows to process this run"
+        required: false
+        default: "200"
+      dry_run:
+        description: "Set to 1 to not write updates"
+        required: false
+        default: "0"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Backfill pricescale
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BATCH_SIZE: ${{ inputs.batch_size }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python cloud/backfill_pricescale.py
