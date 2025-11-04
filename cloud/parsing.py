@@ -164,9 +164,9 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
 
     sym_obj = idea.get("symbol") or {}
     # TradingView typically uses 'pricescale', but some payloads use 'price_scale'
-    pricescale = sym_obj.get("pricescale")
+    pricescale = idea.get("pricescale")
     if pricescale is None:
-        pricescale = sym_obj.get("price_scale")
+        pricescale = idea.get("price_scale")
 
     data_obj = {
         "chart_url": idea.get("publicPath") or idea.get("chart_url"),
