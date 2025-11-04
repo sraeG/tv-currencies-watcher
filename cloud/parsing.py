@@ -2,6 +2,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Iterable, List, Optional
 from bs4 import BeautifulSoup
+import os
+
+DEBUG = os.getenv("DEBUG_PARSER", "0") == "1"
 
 # ---------- Listing (your anchor logic) ----------
 
@@ -42,12 +45,12 @@ def parse_listing_for_uuids_and_links(html: str) -> List[Dict[str, str]]:
         out.append(item)
     return out
 
-# ---------- Detail page parsing (your semantics) ----------
+# ---------- Helpers ----------
 
-def _safe_get(d: dict, path: Iterable) -> Optional[Any]:
+def _safe_get(d: Any, path: Iterable) -> Optional[Any]:
     cur: Any = d
     for key in path:
-        if isinstance(cur, dict) and key in cur:
+        if isinstance(cur, dict) and isinstance(key, str) and key in cur:
             cur = cur[key]
         elif isinstance(cur, list) and isinstance(key, int) and 0 <= key < len(cur):
             cur = cur[key]
@@ -68,8 +71,8 @@ def iso_to_epoch(iso_str: Optional[str]) -> Optional[int]:
 def _extract_elements_from_content(content: Any) -> List[dict]:
     """
     ONLY objects whose type contains "LineTool" from either:
-      ["content","panes",0,"sources"]
-      ["content","charts",0,"panes",0,"sources"]
+      ["panes",0,"sources"]
+      ["charts",0,"panes",0,"sources"]
     For each element store {"type","state","points","indexes"} where present.
     """
     if isinstance(content, str):
@@ -99,6 +102,80 @@ def _extract_elements_from_content(content: Any) -> List[dict]:
                         "indexes": item.get("indexes"),
                     })
     return out
+
+def _iter_sources(content: Any) -> List[dict]:
+    """Yield all source dicts from both known paths."""
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:
+            return []
+
+    paths = [
+        ["panes", 0, "sources"],
+        ["charts", 0, "panes", 0, "sources"],
+    ]
+    out: List[dict] = []
+    for p in paths:
+        sources = _safe_get(content, p)
+        if isinstance(sources, list):
+            for item in sources:
+                if isinstance(item, dict):
+                    out.append(item)
+    return out
+
+def get_pricescale(idea: dict) -> Optional[int]:
+    """
+    Try multiple locations:
+    1) idea['symbol']['pricescale']
+    2) idea['symbol']['price_scale'] (alt key)
+    3) content sources where type contains 'MainSeries' -> state.pricescale
+    4) any source with state.pricescale
+    """
+    sym = idea.get("symbol") or {}
+    ps = sym.get("pricescale")
+    if ps is None:
+        ps = sym.get("price_scale")
+        if ps is not None and DEBUG:
+            print(f"[DEBUG] pricescale from symbol.price_scale = {ps}")
+    if ps is not None:
+        if DEBUG:
+            print(f"[DEBUG] pricescale from symbol.pricescale = {ps}")
+        return ps
+
+    content = idea.get("content")
+    sources = _iter_sources(content)
+
+    # Prefer MainSeries
+    for src in sources:
+        t = src.get("type") or ""
+        if isinstance(t, str) and "MainSeries" in t:
+            state = src.get("state") or {}
+            ps = state.get("pricescale")
+            if ps is not None:
+                if DEBUG:
+                    print(f"[DEBUG] pricescale from MainSeries.state.pricescale = {ps}")
+                return ps
+
+    # Fallback: any source with state.pricescale
+    for src in sources:
+        state = src.get("state") or {}
+        ps = state.get("pricescale")
+        if ps is not None:
+            if DEBUG:
+                t = src.get("type")
+                print(f"[DEBUG] pricescale from source(type={t}).state.pricescale = {ps}")
+            return ps
+
+    if DEBUG:
+        # Print a tiny diagnostic of where we looked
+        print("[DEBUG] pricescale not found. symbol keys:", list(sym.keys()))
+        # Show the first few source types to help inspection
+        first_types = [s.get("type") for s in sources[:5]]
+        print("[DEBUG] first source types:", first_types)
+    return None
+
+# ---------- Detail page parsing (your semantics + pricescale) ----------
 
 def parse_detail_page(html: str) -> Dict[str, Any]:
     """
@@ -163,10 +240,7 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
     elements = _extract_elements_from_content(content)
 
     sym_obj = idea.get("symbol") or {}
-    # TradingView typically uses 'pricescale', but some payloads use 'price_scale'
-    pricescale = idea.get("pricescale")
-    if pricescale is None:
-        pricescale = idea.get("price_scale")
+    pricescale = get_pricescale(idea)
 
     data_obj = {
         "chart_url": idea.get("publicPath") or idea.get("chart_url"),
