@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-import re
 from typing import Any, Dict, Iterable, List, Optional
 from bs4 import BeautifulSoup
 
@@ -104,7 +103,7 @@ def _extract_elements_from_content(content: Any) -> List[dict]:
 def parse_detail_page(html: str) -> Dict[str, Any]:
     """
     Find <script type="application/prs.init-data+json">, DFS to ssrIdeaData,
-    decode content if JSON (best-effort), build your exact field set.
+    decode content if JSON (best-effort), build your exact field set + pricescale.
     """
     soup = BeautifulSoup(html, "html.parser")
     scripts = soup.find_all("script", {"type": "application/prs.init-data+json"})
@@ -137,7 +136,7 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
             break
 
     if not isinstance(idea, dict):
-        # Return empty-but-typed structure
+        # Return empty-but-typed structure (with pricescale=None)
         return {
             "username": None,
             "symbol": None,
@@ -155,12 +154,19 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
                 "description_ast": None,
                 "updates": None,
                 "elements": [],
+                "pricescale": None,
             },
         }
 
     # Decode content JSON only for elements extraction; keep rest as-is
     content = idea.get("content")
     elements = _extract_elements_from_content(content)
+
+    sym_obj = idea.get("symbol") or {}
+    # TradingView typically uses 'pricescale', but some payloads use 'price_scale'
+    pricescale = sym_obj.get("pricescale")
+    if pricescale is None:
+        pricescale = sym_obj.get("price_scale")
 
     data_obj = {
         "chart_url": idea.get("publicPath") or idea.get("chart_url"),
@@ -173,11 +179,12 @@ def parse_detail_page(html: str) -> Dict[str, Any]:
         "description_ast": idea.get("description_ast"),
         "updates": idea.get("updates"),
         "elements": elements,
+        "pricescale": pricescale,
     }
 
     return {
         "username": (idea.get("user") or {}).get("username"),
-        "symbol": (idea.get("symbol") or {}).get("short_name") or "NONE",
+        "symbol": (sym_obj or {}).get("short_name") or "NONE",
         "created_at": iso_to_epoch(idea.get("created_at")),
         "interval": idea.get("interval"),
         "direction": idea.get("direction"),
