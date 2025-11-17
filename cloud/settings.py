@@ -11,7 +11,7 @@ DEFAULT_UA = (
 )
 
 RECENT_LISTING_URL = (
-    "https://www.tradingview.com/markets/currencies/ideas/?sort=recent"
+    "https://www.tradingview.com/ideas/?sort=recent_extended"
 )
 
 # Jitter range in seconds to be polite on each run
@@ -31,7 +31,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 USER_AGENT = os.getenv("USER_AGENT", DEFAULT_UA)
 
-SOURCE_PAGE = "currencies_recent"
+SOURCE_PAGE = "ideas_recent"
 
 @dataclass
 class RunStats:
