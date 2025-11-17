@@ -1,12 +1,11 @@
+# cloud/scraper.py
 from __future__ import annotations
-import os
 import random
 import sys
 import time
-from typing import List
 
 import requests
-from bs4 import BeautifulSoup  # ensure present
+from sqlalchemy.orm import Session
 
 from settings import (
     DATABASE_URL,
@@ -17,34 +16,39 @@ from settings import (
     CONNECT_TIMEOUT,
     RETRY_BACKOFF_SECS,
     USER_AGENT,
-    RECENT_LISTING_URL,
-    SOURCE_PAGE,
+    RECENT_LISTING_URL,  # now pointing to ALL IDEAS by default
+    SOURCE_PAGE,         # default 'ideas_recent'
     RunStats,
 )
 from db import make_engine, create_tables, insert_first_seen, has_uuid, upsert_full_record
-from parsing import parse_listing_for_uuids_and_links, parse_detail_page
+from parsing import (
+    parse_listing_for_uuids_and_links,
+    parse_detail_page,
+    parse_symbol_page_for_pricescale,  # symbol-page fallback for pricescale
+)
 
 
 def http_get(url: str) -> str:
+    """HTTP GET with retries/backoff; raises if exhausted."""
     headers = {"User-Agent": USER_AGENT}
-    last_err = None
+    last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             print(f"[HTTP] GET {url} -> {resp.status_code}")
             if 200 <= resp.status_code < 300:
                 return resp.text
-            else:
-                last_err = RuntimeError(f"HTTP {resp.status_code} for {url}")
+            last_err = RuntimeError(f"HTTP {resp.status_code} for {url}")
         except Exception as e:
             last_err = e
         if attempt < MAX_RETRIES:
             time.sleep(RETRY_BACKOFF_SECS * attempt)
-    raise last_err  # type: ignore[misc]
+    # Exhausted retries
+    raise last_err if last_err else RuntimeError(f"GET failed for {url}")
 
 
 def main() -> int:
-    # Polite jitter per run
+    # Polite per-run jitter
     jitter = random.randint(JITTER_LOW, JITTER_HIGH)
     time.sleep(jitter)
 
@@ -53,12 +57,11 @@ def main() -> int:
     create_tables(engine)
 
     stats = RunStats()
-    from sqlalchemy.orm import Session
 
     with engine.begin() as conn:
         session = Session(bind=conn)
 
-        # 1) Fetch listing
+        # 1) Fetch the ALL-IDEAS listing page
         print(f"[DEBUG] Requesting listing page: {RECENT_LISTING_URL}")
         listing_html = http_get(RECENT_LISTING_URL)
         print(f"[DEBUG] Listing page fetched, length={len(listing_html)}")
@@ -68,8 +71,7 @@ def main() -> int:
         if items:
             print("[DEBUG] First 5 idea URLs:", [it["url"] for it in items[:5]])
 
-        # 2) Iterate ALL items on the page; only fetch details for new UUIDs.
-        #    (No more stop-at-first-known; avoids missing ideas due to sponsored/pinned posts.)
+        # 2) Iterate ALL items; only fetch details for brand-new UUIDs
         for item in items:
             uuid = item["uuid"]
             url = item["url"]
@@ -77,28 +79,35 @@ def main() -> int:
             if has_uuid(session, uuid):
                 print(f"SKIP {uuid} (already seen)")
                 stats.skipped += 1
-                continue  # <-- key change: do NOT break; just skip this one
+                continue
 
+            # Detail page (build full record)
             print(f"[DEBUG] Visiting idea {uuid} at {url}")
             detail_html = http_get(url)
             parsed = parse_detail_page(detail_html)
 
-            sym = (parsed.get("symbol") or "NONE") or "NONE"
-            # Forex 6-letter pairs (letters) OR XAU* (e.g., XAUUSD, XAUEUR, etc.)
-            is_fx = (isinstance(sym, str) and ((len(sym) == 6 and sym.isalpha()) or sym.upper().startswith("XAU")))
-            if not is_fx:
-                print(f"[DEBUG] Non-FX/XAU idea {uuid} sym={sym}; ignoring")
-                # Do NOT insert first_seen for out-of-scope
-                continue
+            # Ensure pricescale via symbol page if missing
+            ps = (parsed.get("data") or {}).get("pricescale")
+            if ps is None:
+                symbol = parsed.get("symbol")
+                if symbol:
+                    sym_url = f"https://www.tradingview.com/symbols/{symbol}/"
+                    try:
+                        sym_html = http_get(sym_url)
+                        ps2 = parse_symbol_page_for_pricescale(sym_html)
+                        if ps2 is not None:
+                            parsed["data"]["pricescale"] = ps2
+                            print(f"[DEBUG] Filled pricescale via symbol page: {ps2}")
+                    except Exception as e:
+                        print(f"[DEBUG] Symbol page fallback failed ({sym_url}): {e}")
 
-            # Record first-seen only for in-scope ideas
+            # Record first-seen + upsert
             insert_first_seen(session, uuid, SOURCE_PAGE)
-
             upsert_full_record(
                 session,
                 uuid=uuid,
                 username=parsed.get("username"),
-                symbol=sym,
+                symbol=parsed.get("symbol"),
                 created_at=parsed.get("created_at"),
                 interval=parsed.get("interval"),
                 direction=parsed.get("direction"),
@@ -106,7 +115,10 @@ def main() -> int:
             )
 
             elements_count = len((parsed.get("data") or {}).get("elements", []) or [])
-            print(f"NEW {uuid} {sym} elements={elements_count}")
+            print(
+                f"NEW {uuid} {parsed.get('symbol')} "
+                f"elements={elements_count} pricescale={(parsed['data'].get('pricescale'))}"
+            )
             stats.new += 1
 
         session.commit()
