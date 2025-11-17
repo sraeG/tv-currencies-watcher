@@ -17,14 +17,13 @@ from settings import (
     RETRY_BACKOFF_SECS,
     USER_AGENT,
     RECENT_LISTING_URL,  # now pointing to ALL IDEAS by default
-    SOURCE_PAGE,         # default 'ideas_recent'
+    SOURCE_PAGE,         # e.g. 'ideas_recent'
     RunStats,
 )
 from db import make_engine, create_tables, insert_first_seen, has_uuid, upsert_full_record
 from parsing import (
     parse_listing_for_uuids_and_links,
     parse_detail_page,
-    parse_symbol_page_for_pricescale,  # symbol-page fallback for pricescale
 )
 
 
@@ -86,21 +85,6 @@ def main() -> int:
             detail_html = http_get(url)
             parsed = parse_detail_page(detail_html)
 
-            # Ensure pricescale via symbol page if missing
-            ps = (parsed.get("data") or {}).get("pricescale")
-            if ps is None:
-                symbol = parsed.get("symbol")
-                if symbol:
-                    sym_url = f"https://www.tradingview.com/symbols/{symbol}/"
-                    try:
-                        sym_html = http_get(sym_url)
-                        ps2 = parse_symbol_page_for_pricescale(sym_html)
-                        if ps2 is not None:
-                            parsed["data"]["pricescale"] = ps2
-                            print(f"[DEBUG] Filled pricescale via symbol page: {ps2}")
-                    except Exception as e:
-                        print(f"[DEBUG] Symbol page fallback failed ({sym_url}): {e}")
-
             # Record first-seen + upsert
             insert_first_seen(session, uuid, SOURCE_PAGE)
             upsert_full_record(
@@ -114,10 +98,12 @@ def main() -> int:
                 data=parsed.get("data"),
             )
 
-            elements_count = len((parsed.get("data") or {}).get("elements", []) or [])
+            data = parsed.get("data") or {}
+            elements_count = len(data.get("elements", []) or [])
+            ps = data.get("pricescale")
             print(
                 f"NEW {uuid} {parsed.get('symbol')} "
-                f"elements={elements_count} pricescale={(parsed['data'].get('pricescale'))}"
+                f"elements={elements_count} pricescale={ps}"
             )
             stats.new += 1
 
