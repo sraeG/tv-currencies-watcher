@@ -1,6 +1,7 @@
 # cloud/scraper.py
 
 #V2
+# Cursor/Claude project now being processed.
 
 from __future__ import annotations
 import random
